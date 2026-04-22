@@ -1120,10 +1120,11 @@ const notify = async (description) => {
       lastNotification.notification === description &&
       new Date() - lastNotification.timestamp < 10000
     ) {
-      return; // Skip duplicate notifications within 10 seconds
+      return; 
     }
 
-    const response = await fetch(
+    // 1. Existing Notification System
+    await fetch(
       "http://localhost:7210/notifications/create-new-notification",
       {
         method: "POST",
@@ -1139,17 +1140,31 @@ const notify = async (description) => {
       }
     );
 
-    if (!response.ok) {
-      console.error("Failed to send notification");
-    } else {
-      // Add notification to identity changes log
-      identityTracker.identityChanges.push({
-        timestamp: new Date(),
-        notification: description,
-      });
-    }
+    // 2. New Structured Incident Logging
+    const incidentType = description.split(':')[0].toUpperCase().replace(/\s+/g, '_');
+    await fetch('http://localhost:7210/verification/log-incident', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        examId: examID.value,
+        studentEmail: email,
+        incidentType: incidentType || 'POLICY_VIOLATION',
+        detail: description,
+        confidence: userConfidence.value || 1.0,
+        timestamp: new Date().toISOString()
+      })
+    });
+
+    // Add notification to identity changes log
+    identityTracker.identityChanges.push({
+      timestamp: new Date(),
+      notification: description,
+    });
   } catch (error) {
-    console.error("Error sending notification:", error);
+    console.error("Error sending notification/incident:", error);
   }
 };
 
@@ -1168,6 +1183,10 @@ const handleResize = () => {
 // Lifecycle Hooks
 onMounted(async () => {
   isElectron.value = !!window.api;
+  
+  // Trigger Browser Extension Fullscreen
+  console.log("Triggering proctoring extension...");
+  window.dispatchEvent(new CustomEvent('PROCTOR_FORCE_FULLSCREEN'));
 
   // Fetch exam data
   await getExamByID();

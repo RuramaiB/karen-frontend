@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Force Fullscreen Proctor",
+  "version": "1.0",
+  "description": "Enforces fullscreen mode for proctoring sessions.",
+  "permissions": [
+    "tabs",
+    "windows",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Force Fullscreen Proctor"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
