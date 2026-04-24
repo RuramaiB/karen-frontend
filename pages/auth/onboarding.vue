@@ -81,6 +81,17 @@ const navigateTo = (page) => {
 };
 
 const handleNavigation = async () => {
+  const email = localStorage.getItem("Email");
+  if (email) {
+    try {
+      await fetch(`http://localhost:7210/api/v1/auth/update-is-first-time-by-/${email}`, {
+        method: 'PUT'
+      });
+      localStorage.setItem('isFirstTime', 'false');
+    } catch (error) {
+      console.error("Error updating first time status:", error);
+    }
+  }
   navigateTo("auth/signin");
 };
 

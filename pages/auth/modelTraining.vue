@@ -41,14 +41,23 @@
   import * as faceapi from "face-api.js";
   
   // State Variables
-  const email = ref([]);
+  const email = ref("");
   const images = ref([]);
   const loading = ref(false);
   const labeledDescriptors = reactive([]); // Unified dataset with name and email
-  email.value = localStorage.getItem("Email")
   // On Component Mount
   onMounted(async () => {
-    loading.value = true
+    loading.value = true;
+    const storedEmail = localStorage.getItem("Email");
+    if (storedEmail) {
+      email.value = storedEmail;
+    } else {
+      console.error("Email not found in localStorage");
+      alert("System error: Your email session has expired. Please sign in again.");
+      navigateTo("/auth/signin");
+      return;
+    }
+
     try {
       // Load Models
       console.log("Loading models...");
@@ -56,9 +65,25 @@
       await faceapi.nets.faceLandmark68Net.loadFromUri("/models");
       await faceapi.nets.faceRecognitionNet.loadFromUri("/models");
       console.log("Models loaded successfully.");
+
+      // Fetch existing dataset
+      const response = await fetch("http://localhost:7210/dataset/get-dataset-by-/master");
+      if (response.ok) {
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          labeledDescriptors.splice(0, labeledDescriptors.length, ...data.map(item => ({
+            email: item.email,
+            label: item.label || item.email,
+            descriptors: item.descriptors.map(d => new Float32Array(d))
+          })));
+          console.log("Existing dataset loaded.");
+        }
+      }
+      
       loading.value = false
     } catch (error) {
-      console.error("Error loading models:", error);
+      console.error("Error loading models or dataset:", error);
+      loading.value = false
     }
   });
   
@@ -70,38 +95,57 @@
   
   // Add or Update Label with Email
   const addOrUpdateLabel = async () => {
-    loading.value = true
+    loading.value = true;
+    console.log("Checking upload requirements:", { email: email.value, imagesCount: images.value.length });
+    
     if (!email.value || !images.value.length) {
-      alert("Please upload images.");
+      alert(`Missing requirements: ${!email.value ? 'Email' : 'Images'} not found.`);
+      loading.value = false;
       return;
     }
   
-    console.log(`Adding/Updating: Email - ${email.value}`);
+    console.log(`Processing ${images.value.length} images...`);
     const descriptors = [];
-    for (const image of images.value) {
-      const img = await faceapi.bufferToImage(image);
-      const detection = await faceapi
-        .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
-        .withFaceLandmarks()
-        .withFaceDescriptor();
-  
-      if (detection) descriptors.push(detection.descriptor);
+    for (const [index, image] of images.value.entries()) {
+      try {
+        const img = await faceapi.bufferToImage(image);
+        const detection = await faceapi
+          .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions())
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+    
+        if (detection) {
+          descriptors.push(detection.descriptor);
+          console.log(`Face detected in image ${index + 1}`);
+        } else {
+          console.warn(`No face detected in image ${index + 1}`);
+        }
+      } catch (err) {
+        console.error(`Error processing image ${index + 1}:`, err);
+      }
+    }
+
+    if (descriptors.length === 0) {
+      alert("No faces were detected in the uploaded images. Please try with clearer photos.");
+      loading.value = false;
+      return;
     }
   
     const existingIndex = labeledDescriptors.findIndex((desc) => desc.email === email.value);
     if (existingIndex !== -1) {
-      console.log(`Email "${email.value}" exists. Updating descriptors.`);
+      console.log(`Email "${email.value}" exists. Adding ${descriptors.length} descriptors.`);
       labeledDescriptors[existingIndex].descriptors.push(...descriptors);
     } else {
-      console.log(`Email "${email.value}" does not exist. Creating new entry.`);
+      console.log(`Email "${email.value}" does not exist. Creating new entry with ${descriptors.length} descriptors.`);
       labeledDescriptors.push({
         email: email.value,
+        label: email.value,
         descriptors: descriptors,
       });
     }
-    saveTrainedData()
-    email.value = "";
+    await saveTrainedData();
     images.value = [];
+    loading.value = false;
   };
   
   // Save Trained Data
