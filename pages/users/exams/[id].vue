@@ -195,15 +195,27 @@
           </div>
 
           <!-- Alerts -->
-          <div v-if="alertMessage" class="bg-red-50 border-l-4 border-red-400 p-4 rounded-r-md">
-            <div class="flex">
+          <div v-if="alertMessage || proctoringAlert" class="bg-red-50 border-l-4 border-red-400 p-4 rounded-r-md space-y-2">
+            <div v-if="alertMessage" class="flex">
               <div class="flex-shrink-0">
                 <svg class="h-5 w-5 text-red-400" fill="currentColor" viewBox="0 0 20 20">
                   <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
                 </svg>
               </div>
               <div class="ml-3">
+                <p class="text-sm text-red-700 font-bold uppercase">System Alert</p>
                 <p class="text-sm text-red-700">{{ alertMessage }}</p>
+              </div>
+            </div>
+            <div v-if="proctoringAlert" class="flex">
+              <div class="flex-shrink-0">
+                <svg class="h-5 w-5 text-orange-400" fill="currentColor" viewBox="0 0 20 20">
+                  <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+              </div>
+              <div class="ml-3">
+                <p class="text-sm text-red-700 font-bold uppercase">AI Monitor</p>
+                <p class="text-sm text-red-700">{{ proctoringAlert }}</p>
               </div>
             </div>
           </div>
@@ -238,6 +250,8 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import * as faceapi from "face-api.js";
+import * as tf from "@tensorflow/tfjs";
+import * as cocoSsd from "@tensorflow-models/coco-ssd";
 
 const route = useRoute();
 const router = useRouter();
@@ -267,8 +281,60 @@ const qa = ref({
   answers: []
 })
 
-// Identity verification tracking
-const identityTracker = reactive({
+// Advanced AI Proctoring
+const ssdModel = ref(null);
+const gazeAwayStartTime = ref(null);
+const proctoringAlert = ref(null);
+
+// Unified Incident & Notification Logging
+const logIncident = async (type, detail, confidence = 1.0) => {
+    // Prevent duplicate logs for the same incident in a short time
+    const now = Date.now();
+    const incidentKey = `${type}-${detail}`;
+    if (state.lastIncidentTime[incidentKey] && (now - state.lastIncidentTime[incidentKey] < 5000)) {
+        return;
+    }
+    state.lastIncidentTime[incidentKey] = now;
+
+    // Categorize specifically requested behaviors as SUSPICIOUS_BEHAVIOR
+    const refinedType = (type === 'GAZE_DEVIATION' || type === 'PHONE_DETECTED') ? 'SUSPICIOUS_BEHAVIOR' : type;
+    const refinedDetail = type === refinedType ? detail : `[${type}] ${detail}`;
+
+    console.log(`Backend Logging: ${refinedType} - ${refinedDetail}`);
+
+    try {
+        // 1. Log as structured incident
+        await $fetch('http://localhost:7210/verification/log-incident', {
+            method: 'POST',
+            body: {
+                examId: examID.value || "UNKNOWN_EXAM",
+                studentEmail: email,
+                incidentType: refinedType,
+                detail: refinedDetail,
+                confidence: confidence,
+                timestamp: new Date().toISOString()
+            }
+        });
+
+        // 2. Log as notification for Admin Dashboard
+        await $fetch('http://localhost:7210/notifications/create-new-notification', {
+            method: 'POST',
+            body: {
+                title: "Policy violation",
+                message: refinedDetail,
+                studentEmail: email,
+            }
+        });
+
+        console.log(`Backend Persistence Success: ${refinedType}`);
+    } catch (err) {
+        console.error("Backend Persistence Failure:", err);
+    }
+};
+
+const notify = (description) => {
+    logIncident("POLICY_VIOLATION", description);
+};
   verifiedCount: 0,
   unverifiedCount: 0,
   lastIdentity: null,
@@ -373,6 +439,7 @@ const state = reactive({
   active: false,
   detectionAttempts: 0,
   detectionFailures: 0,
+  lastIncidentTime: {},
 });
 
 // Computed properties
@@ -625,6 +692,16 @@ const loadModels = async () => {
     await faceapi.nets.tinyFaceDetector.loadFromUri("/models");
     await faceapi.nets.faceLandmark68Net.loadFromUri("/models");
     await faceapi.nets.faceRecognitionNet.loadFromUri("/models");
+    await faceapi.nets.faceExpressionNet.loadFromUri("/models");
+    
+    // Load Object Detection
+    try {
+      ssdModel.value = await cocoSsd.load();
+      console.log("Object Detection Model Loaded");
+    } catch (err) {
+      console.error("Failed to load coco-ssd:", err);
+    }
+
     modelsLoaded.value = true;
     faceStatus.value = "Models loaded";
     return true;
@@ -998,8 +1075,8 @@ const verifyFace = async () => {
     context.clearRect(0, 0, canvas.width, canvas.height);
 
     // Detect face with landmarks and descriptor
-    const detection = await faceapi
-      .detectSingleFace(
+    const detections = await faceapi
+      .detectAllFaces(
         video,
         new faceapi.TinyFaceDetectorOptions({
           inputSize: settings.inputSize,
@@ -1007,12 +1084,31 @@ const verifyFace = async () => {
         })
       )
       .withFaceLandmarks()
-      .withFaceDescriptor();
+      .withFaceExpressions()
+      .withFaceDescriptors();
 
-    if (!detection) {
+    // Phone Detection
+    if (ssdModel.value) {
+      const predictions = await ssdModel.value.detect(video);
+      const phone = predictions.find(p => p.class === 'cell phone' && p.score > 0.6);
+      if (phone) {
+        proctoringAlert.value = "Unauthorized device detected!";
+        logIncident("PHONE_DETECTED", "Mobile phone detected in frame", phone.score);
+      }
+    }
+
+    if (detections.length === 0) {
       handleIdentityChange(null, 0);
+      gazeAwayStartTime.value = null;
       return;
     }
+
+    if (detections.length > 1) {
+      proctoringAlert.value = "Multiple persons detected!";
+      logIncident("MULTIPLE_FACES", `${detections.length} people detected in frame`);
+    }
+
+    const detection = detections[0];
 
     // Draw face detection box
     drawFaceBox(detection, canvas);
@@ -1076,9 +1172,18 @@ const verifyFace = async () => {
           if (noseOffset > eyeDistance * 0.25) {
           state.lookingAwayFrames++;
 
-          if (state.lookingAwayFrames > settings.maxLookAwayFrames) {
             const direction =
               nose.x > (leftEye.x + rightEye.x) / 2 ? "right" : "left";
+
+            if (!gazeAwayStartTime.value) {
+              gazeAwayStartTime.value = Date.now();
+            } else {
+              const gazeDuration = (Date.now() - gazeAwayStartTime.value) / 1000;
+              if (gazeDuration > 3) {
+                proctoringAlert.value = "Please focus on the screen.";
+                logIncident("GAZE_DEVIATION", `User looked to the ${direction} for ${gazeDuration.toFixed(1)}s`);
+              }
+            }
 
             // Only notify about looking away if we are reasonably sure about it
             if (
@@ -1094,8 +1199,20 @@ const verifyFace = async () => {
         } else {
           // Reset counter when looking forward
           state.lookingAwayFrames = 0;
+          gazeAwayStartTime.value = null;
+          if (proctoringAlert.value && proctoringAlert.value.includes("focus")) {
+            proctoringAlert.value = null;
+          }
         }
-      }
+
+        // Facial Expression Analysis
+        const expressions = detection.expressions;
+        if (expressions) {
+            const dominant = Object.entries(expressions).reduce((a, b) => a[1] > b[1] ? a : b)[0];
+            if (['happy', 'surprised'].includes(dominant) && expressions[dominant] > 0.8) {
+                // logIncident("SUSPICIOUS_EXPRESSION", `User showing ${dominant} expression during exam`);
+            }
+        }
     }
   } catch (error) {
     console.error("Error during face verification:", error);
@@ -1108,65 +1225,6 @@ const verifyFace = async () => {
   }
 };
 
-const notify = async (description) => {
-  try {
-    // Avoid duplicate notifications by checking if this is same as last notification
-    const lastNotification =
-      identityTracker.identityChanges[
-      identityTracker.identityChanges.length - 1
-      ];
-    if (
-      lastNotification &&
-      lastNotification.notification === description &&
-      new Date() - lastNotification.timestamp < 10000
-    ) {
-      return; 
-    }
-
-    // 1. Existing Notification System
-    await fetch(
-      "http://localhost:7210/notifications/create-new-notification",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          title: "Policy violation",
-          message: description,
-          studentEmail: email,
-        }),
-      }
-    );
-
-    // 2. New Structured Incident Logging
-    const incidentType = description.split(':')[0].toUpperCase().replace(/\s+/g, '_');
-    await fetch('http://localhost:7210/verification/log-incident', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        examId: examID.value,
-        studentEmail: email,
-        incidentType: incidentType || 'POLICY_VIOLATION',
-        detail: description,
-        confidence: userConfidence.value || 1.0,
-        timestamp: new Date().toISOString()
-      })
-    });
-
-    // Add notification to identity changes log
-    identityTracker.identityChanges.push({
-      timestamp: new Date(),
-      notification: description,
-    });
-  } catch (error) {
-    console.error("Error sending notification/incident:", error);
-  }
-};
 
 // Handle browser resize to adjust canvas size
 const handleResize = () => {

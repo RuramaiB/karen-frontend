@@ -116,6 +116,8 @@ const {
   blockInteractions: true
 });
 
+const proctoringActive = ref(false);
+
 // Audio Monitoring State
 const audioContext = ref(null);
 const analyser = ref(null);
@@ -362,4 +364,3 @@ onBeforeUnmount(() => {
     pointer-events: none;
   }
   </style>
-  
