@@ -335,6 +335,9 @@ const logIncident = async (type, detail, confidence = 1.0) => {
 const notify = (description) => {
     logIncident("POLICY_VIOLATION", description);
 };
+
+// Identity verification tracking
+const identityTracker = reactive({
   verifiedCount: 0,
   unverifiedCount: 0,
   lastIdentity: null,
