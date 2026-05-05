@@ -140,7 +140,7 @@
             <!-- Camera Feed -->
             <div class="relative w-full aspect-video bg-gray-100 rounded-md overflow-hidden mb-3">
               <video ref="camera" autoplay muted class="w-full h-full object-cover"></video>
-              <canvas ref="overlay" class="absolute top-0 left-0 w-full h-full pointer-events-none"></canvas>
+              <canvas ref="overlay" class="absolute top-0 left-0 w-full h-full object-cover pointer-events-none"></canvas>
 
               <!-- Status Badge -->
               <div class="absolute bottom-2 left-2 right-2 flex justify-between items-center">
@@ -991,58 +991,77 @@ const checkSustainedLooking = () => {
   }
 };
 
-const drawFaceBox = (detection, canvas) => {
-  if (!detection || !canvas) return;
+const drawFaceBox = (detection, canvas, phones = []) => {
+  if (!canvas) return;
 
   const context = canvas.getContext("2d");
   context.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Draw face detection box
+  // 1. Draw Phone Detections
+  phones.forEach(phone => {
+    const [x, y, width, height] = phone.bbox;
+    context.strokeStyle = "#ff4757"; // Bright red
+    context.lineWidth = 4;
+    context.strokeRect(x, y, width, height);
+    
+    context.fillStyle = "#ff4757";
+    context.font = "bold 16px Inter, sans-serif";
+    context.fillText(`⚠ PHONE DETECTED (${Math.round(phone.score * 100)}%)`, x, y > 20 ? y - 10 : y + 25);
+  });
+
+  if (!detection) return;
+
+  // 2. Draw Face Detection Box
   const box = detection.detection.box;
-  context.strokeStyle = identityVerified.value ? "#4ade80" : "#f87171";
+  const isVerified = identityVerified.value;
+  context.strokeStyle = isVerified ? "#2ed573" : "#ffa502";
   context.lineWidth = 3;
+  context.setLineDash(isVerified ? [] : [5, 5]); // Dashed for unverified
   context.strokeRect(box.x, box.y, box.width, box.height);
+  context.setLineDash([]);
 
-  // Draw identity verification status
-  if (faceDetected.value) {
-    const textY = box.y - 10;
-    context.font = "14px Arial";
-    context.fillStyle = identityVerified.value ? "#4ade80" : "#f87171";
-    context.fillText(
-      identityVerified.value
-        ? `Verified (${Math.round(userConfidence.value * 100)}%)`
-        : "Unverified",
-      box.x,
-      textY > 0 ? textY : box.y + box.height + 20
-    );
+  // 3. Draw Identity status
+  const textY = box.y - 10;
+  context.font = "bold 14px Inter, sans-serif";
+  context.fillStyle = isVerified ? "#2ed573" : "#ffa502";
+  context.fillText(
+    isVerified
+      ? `✓ Verified: ${email}`
+      : "⚠ Identity Unverified",
+    box.x,
+    textY > 0 ? textY : box.y + box.height + 20
+  );
 
-    // Draw eye landmarks to track gaze
-    if (detection.landmarks) {
-      // Draw eyes
-      const rightEye = detection.landmarks.getRightEye();
-      const leftEye = detection.landmarks.getLeftEye();
+  // 4. Draw Face & Eye Alignment (Landmarks)
+  if (detection.landmarks) {
+    const landmarks = detection.landmarks.positions;
+    
+    // Draw alignment mesh (dots)
+    context.fillStyle = "rgba(255, 255, 255, 0.7)";
+    landmarks.forEach((pt, i) => {
+      // Highlight key points: Eyes (36-47), Nose (27-35), Mouth (48-67)
+      const isKey = (i >= 36 && i <= 47) || (i >= 27 && i <= 35);
+      context.beginPath();
+      context.arc(pt.x, pt.y, isKey ? 2 : 1, 0, 2 * Math.PI);
+      context.fill();
+    });
 
-      context.fillStyle = "#ffffff";
-      context.strokeStyle = "#3b82f6";
+    // Visualize Eye Alignment / Gaze Direction
+    const rightEye = detection.landmarks.getRightEye();
+    const leftEye = detection.landmarks.getLeftEye();
+    
+    const drawEyeBox = (eye) => {
+      const minX = Math.min(...eye.map(p => p.x));
+      const maxX = Math.max(...eye.map(p => p.x));
+      const minY = Math.min(...eye.map(p => p.y));
+      const maxY = Math.max(...eye.map(p => p.y));
+      context.strokeStyle = "#374151";
       context.lineWidth = 1;
+      context.strokeRect(minX - 2, minY - 2, (maxX - minX) + 4, (maxY - minY) + 4);
+    };
 
-      // Draw lines connecting eye points
-      context.beginPath();
-      context.moveTo(rightEye[0].x, rightEye[0].y);
-      for (let i = 1; i < rightEye.length; i++) {
-        context.lineTo(rightEye[i].x, rightEye[i].y);
-      }
-      context.closePath();
-      context.stroke();
-
-      context.beginPath();
-      context.moveTo(leftEye[0].x, leftEye[0].y);
-      for (let i = 1; i < leftEye.length; i++) {
-        context.lineTo(leftEye[i].x, leftEye[i].y);
-      }
-      context.closePath();
-      context.stroke();
-    }
+    drawEyeBox(rightEye);
+    drawEyeBox(leftEye);
   }
 };
 
@@ -1091,18 +1110,21 @@ const verifyFace = async () => {
       .withFaceDescriptors();
 
     // Phone Detection
+    let detectedPhones = [];
     if (ssdModel.value) {
       const predictions = await ssdModel.value.detect(video);
-      const phone = predictions.find(p => p.class === 'cell phone' && p.score > 0.6);
-      if (phone) {
+      detectedPhones = predictions.filter(p => p.class === 'cell phone' && p.score > 0.4);
+      if (detectedPhones.length > 0) {
         proctoringAlert.value = "Unauthorized device detected!";
-        logIncident("PHONE_DETECTED", "Mobile phone detected in frame", phone.score);
+        logIncident("PHONE_DETECTED", "Mobile phone detected in frame", detectedPhones[0].score);
       }
     }
 
     if (detections.length === 0) {
       handleIdentityChange(null, 0);
       gazeAwayStartTime.value = null;
+      // Still draw phone if detected
+      drawFaceBox(null, canvas, detectedPhones);
       return;
     }
 
@@ -1113,8 +1135,8 @@ const verifyFace = async () => {
 
     const detection = detections[0];
 
-    // Draw face detection box
-    drawFaceBox(detection, canvas);
+    // Draw face detection box & phone box
+    drawFaceBox(detection, canvas, detectedPhones);
 
     // Verify identity if we have labeled descriptors
     if (labeledDescriptors.length > 0) {
