@@ -1,5 +1,22 @@
 <template>
-  <div class="min-h-screen bg-gray-50">
+  <div class="min-h-screen bg-gray-50 relative overflow-hidden">
+    <!-- Lockdown Overlay (Shown when proctoring is breached) -->
+    <div v-if="(!isFullscreen || !isFocused) && isMonitoring" class="fixed inset-0 z-[2000] bg-black bg-opacity-95 flex flex-col items-center justify-center p-10 text-center">
+      <div class="bg-red-600 text-white p-8 rounded-xl shadow-2xl max-w-md animate-pulse">
+        <h2 class="text-3xl font-bold mb-4 uppercase tracking-tighter">Security Breach</h2>
+        <p class="text-lg mb-6 font-medium">
+          The exam has been paused because you exited fullscreen mode or navigated away from the window.
+          Please re-enter fullscreen to continue.
+        </p>
+        <button 
+          @click="enterFullscreen" 
+          class="bg-white text-red-600 px-8 py-3 rounded-xl font-bold text-xl hover:bg-gray-100 transition-all shadow-lg active:scale-95"
+        >
+          Return to Exam
+        </button>
+      </div>
+    </div>
+
     <!-- Teams-like header -->
     <div class="bg-[#464EB8] text-white p-4 shadow-md">
       <div class="max-w-6xl mx-auto flex justify-between items-center">
@@ -252,9 +269,23 @@ import { useRoute, useRouter } from "vue-router";
 import * as faceapi from "face-api.js";
 import * as tf from "@tensorflow/tfjs";
 import * as cocoSsd from "@tensorflow-models/coco-ssd";
+import { useProctoring } from "~/composables/useProctoring";
 
 const route = useRoute();
 const router = useRouter();
+
+// Proctoring Composable Integration
+const { 
+  isFullscreen, 
+  isFocused, 
+  enterFullscreen,
+} = useProctoring({
+  examId: route.params.id, // Pass the actual exam ID from the route
+  enforceFullscreen: true,
+  monitorFocus: true,
+  blockInteractions: true
+});
+
 const currentPage = ref(0);
 const questionsPerPage = 5;
 const timeRemaining = ref(0);
@@ -313,16 +344,6 @@ const logIncident = async (type, detail, confidence = 1.0) => {
                 detail: refinedDetail,
                 confidence: confidence,
                 timestamp: new Date().toISOString()
-            }
-        });
-
-        // 2. Log as notification for Admin Dashboard
-        await $fetch('http://localhost:7210/notifications/create-new-notification', {
-            method: 'POST',
-            body: {
-                title: "Policy violation",
-                message: refinedDetail,
-                studentEmail: email,
             }
         });
 
@@ -1267,9 +1288,8 @@ const handleResize = () => {
 onMounted(async () => {
   isElectron.value = !!window.api;
   
-  // Trigger Browser Extension Fullscreen
-  console.log("Triggering proctoring extension...");
-  window.dispatchEvent(new CustomEvent('PROCTOR_FORCE_FULLSCREEN'));
+  // Trigger Fullscreen on start
+  await enterFullscreen();
 
   // Fetch exam data
   await getExamByID();
